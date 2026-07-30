@@ -31,16 +31,21 @@ if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = getattr(Image.Resampling, 'LANCZOS', Image.LANCZOS)
 
 # ---------------------------------------------------------
-# 2. KẾT NỐI GOOGLE APIS TỪ STREAMLIT SECRETS
+# 2. KẾT NỐI GOOGLE APIS TỪ STREAMLIT SECRETS (ĐÃ FIX LỖI PEM)
 # ---------------------------------------------------------
 @st.cache_resource
 def get_google_services():
     try:
-        creds_json = dict(st.secrets["gcp_service_account"])
-        
-        # 🔑 FIX LỖI "Unable to load PEM file": Tự động xử lý ký tự xuống dòng
-        if "private_key" in creds_json:
-            creds_json["private_key"] = creds_json["private_key"].replace("\\n", "\n")
+        # 🔑 Hỗ trợ đọc cả dạng JSON thô (gcp_json) lẫn dạng TOML cũ (gcp_service_account)
+        if "gcp_json" in st.secrets:
+            creds_json = json.loads(st.secrets["gcp_json"], strict=False)
+        elif "gcp_service_account" in st.secrets:
+            creds_json = dict(st.secrets["gcp_service_account"])
+            if "private_key" in creds_json:
+                creds_json["private_key"] = creds_json["private_key"].replace("\\n", "\n")
+        else:
+            st.error("❌ Chưa tìm thấy cấu hình Secrets trong Streamlit!")
+            return None, None
 
         scopes = [
             'https://www.googleapis.com/auth/spreadsheets',
