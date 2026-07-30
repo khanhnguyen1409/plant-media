@@ -37,6 +37,11 @@ if not hasattr(Image, 'ANTIALIAS'):
 def get_google_services():
     try:
         creds_json = dict(st.secrets["gcp_service_account"])
+        
+        # 🔑 FIX LỖI "Unable to load PEM file": Tự động xử lý ký tự xuống dòng
+        if "private_key" in creds_json:
+            creds_json["private_key"] = creds_json["private_key"].replace("\\n", "\n")
+
         scopes = [
             'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive'
