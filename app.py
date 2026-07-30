@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 import io
 
 # ---------------------------------------------------------
@@ -61,19 +62,29 @@ def get_google_services():
 sheets_service, drive_service = get_google_services()
 
 # ---------------------------------------------------------
-# 3. CÁC HÀM XỬ LÝ GOOGLE DRIVE FILE/FOLDER
+# 3. CÁC HÀM XỬ LÝ GOOGLE DRIVE FILE/FOLDER (HỖ TRỢ ALL DRIVES)
 # ---------------------------------------------------------
 def find_folder_id(folder_name, parent_id=None):
     query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     if parent_id:
         query += f" and '{parent_id}' in parents"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    results = drive_service.files().list(
+        q=query, 
+        fields="files(id, name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
     files = results.get('files', [])
     return files[0]['id'] if files else None
 
 def list_files_in_folder(folder_id):
     query = f"'{folder_id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false"
-    results = drive_service.files().list(q=query, fields="files(id, name, mimeType)").execute()
+    results = drive_service.files().list(
+        q=query, 
+        fields="files(id, name, mimeType)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
     return results.get('files', [])
 
 def download_file_from_drive(file_id, local_path):
@@ -85,36 +96,32 @@ def download_file_from_drive(file_id, local_path):
         _, done = downloader.next_chunk()
 
 def upload_file_to_drive(local_path, drive_folder_id, file_name, mime_type='image/jpeg'):
+    if not drive_folder_id:
+        st.error(f"❌ Lỗi: Thư mục lưu trữ đích cho file `{file_name}` không tồn tại trên Google Drive!")
+        return None
+
     file_metadata = {'name': file_name, 'parents': [drive_folder_id]}
-    file_size = os.path.getsize(local_path)
-    
-    # 🔑 ĐIỀU CHỈNH CHUẨN GOOGLE DRIVE API:
-    # 1. File dưới 5MB (chủ yếu là Ảnh): Upload trực tiếp nhanh gọn
-    if file_size < 5 * 1024 * 1024:
-        media = MediaFileUpload(local_path, mimetype=mime_type, resumable=False)
+    try:
+        media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
         file = drive_service.files().create(
             body=file_metadata, 
             media_body=media, 
-            fields='id'
+            fields='id',
+            supportsAllDrives=True
         ).execute(num_retries=3)
         return file.get('id')
-    else:
-        # 2. File từ 5MB trở lên (Video): Bắt buộc dùng Resumable với chunk 5MB chuẩn
-        chunk_size = 5 * 1024 * 1024 # Bội số chuẩn 256KB
-        media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=chunk_size, resumable=True)
-        request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
-        
-        response = None
-        while response is None:
-            status, response = request.next_chunk(num_retries=5)
-        return response.get('id')
+    except HttpError as e:
+        err_msg = e.content.decode('utf-8') if hasattr(e, 'content') else str(e)
+        st.error(f"❌ Lỗi Google Drive API ({e.resp.status}) khi upload '{file_name}': {err_msg}")
+        raise e
 
 def move_drive_file(file_id, old_folder_id, new_folder_id):
     drive_service.files().update(
         fileId=file_id,
         addParents=new_folder_id,
         removeParents=old_folder_id,
-        fields='id, parents'
+        fields='id, parents',
+        supportsAllDrives=True
     ).execute()
 
 # ---------------------------------------------------------
@@ -236,17 +243,22 @@ if not sheets_service or not drive_service:
 st.info("📌 Hệ thống PlantMedia đã sẵn sàng!")
 
 if st.button("🚀 BẮT ĐẦU XỬ LÝ MEDIA (RUN)", type="primary", use_container_width=True):
-    with st.spinner("Đang kiểm tra kết nối Google Drive..."):
+    with st.spinner("Đang kiểm tra cấu trúc thư mục Google Drive..."):
         root_id = find_folder_id("Plant_Sales")
         if not root_id:
-            st.error("❌ Không tìm thấy folder 'Plant_Sales' trên Drive. Vui lòng kiểm tra lại Bước 0!")
+            st.error("❌ Không tìm thấy thư mục 'Plant_Sales' trên Drive. Vui lòng kiểm tra lại tên thư mục!")
             st.stop()
             
         raw_id = find_folder_id("01_Raw", root_id)
-        orig_id = find_folder_id("00_Original", raw_id)
+        orig_id = find_folder_id("00_Original", raw_id) if raw_id else None
         assets_id = find_folder_id("02_Assets", root_id)
         edited_id = find_folder_id("03_Edited", root_id)
-        music_id = find_folder_id("Music", assets_id)
+        music_id = find_folder_id("Music", assets_id) if assets_id else None
+
+        # Kiểm tra kĩ tính sẵn sàng của các thư mục bắt buộc
+        if not raw_id or not edited_id:
+            st.error(f"❌ Thiếu thư mục trên Drive! (Thư mục '01_Raw': {'✅ OK' if raw_id else '❌ Không tìm thấy'}, Thư mục '03_Edited': {'✅ OK' if edited_id else '❌ Không tìm thấy'})")
+            st.stop()
 
     tab_name = "Plant_Sales"
     rows = sheets_service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range=f"'{tab_name}'!A1:E10000").execute().get('values', [])
@@ -267,14 +279,14 @@ if st.button("🚀 BẮT ĐẦU XỬ LÝ MEDIA (RUN)", type="primary", use_conta
             'Run_Again': (str(row[idx_run]).strip().upper() == 'TRUE') if len(row) > idx_run else False,
         }
 
-    assets_files = list_files_in_folder(assets_id)
+    assets_files = list_files_in_folder(assets_id) if assets_id else []
     logo_file = next((f for f in assets_files if f['name'].lower() == 'logo.png'), None)
     font_file = next((f for f in assets_files if f['name'].lower() == 'font.ttf'), None)
 
     temp_logo = tempfile.mktemp(suffix=".png")
     temp_font = tempfile.mktemp(suffix=".ttf")
-    download_file_from_drive(logo_file['id'], temp_logo)
-    download_file_from_drive(font_file['id'], temp_font)
+    if logo_file: download_file_from_drive(logo_file['id'], temp_logo)
+    if font_file: download_file_from_drive(font_file['id'], temp_font)
 
     music_files = list_files_in_folder(music_id) if music_id else []
 
@@ -320,7 +332,8 @@ if st.button("🚀 BẮT ĐẦU XỬ LÝ MEDIA (RUN)", type="primary", use_conta
             if out_p:
                 upload_file_to_drive(out_p, edited_id, f"{disp_raw}_{r_info['Gia_Ban']}k.jpg")
 
-            move_drive_file(f['id'], raw_id, orig_id)
+            if orig_id:
+                move_drive_file(f['id'], raw_id, orig_id)
             count_img += 1
 
         elif ext_low in ['.mp4', '.mov', '.avi', '.hevc']:
@@ -333,7 +346,8 @@ if st.button("🚀 BẮT ĐẦU XỬ LÝ MEDIA (RUN)", type="primary", use_conta
 
             out_vid = process_video(local_raw, temp_logo, temp_font, local_music, disp_raw)
             upload_file_to_drive(out_vid, edited_id, f"{disp_raw}_video.mp4", mime_type='video/mp4')
-            move_drive_file(f['id'], raw_id, orig_id)
+            if orig_id:
+                move_drive_file(f['id'], raw_id, orig_id)
             count_vid += 1
 
         progress_bar.progress((idx + 1) / len(raw_files))
