@@ -1,0 +1,9 @@
+streamlit
+moviepy==1.0.3
+imageio-ffmpeg
+google-api-python-client
+google-auth
+pillow
+pillow-heif
+proglog
+pytz
