@@ -88,28 +88,30 @@ def upload_file_to_drive(local_path, drive_folder_id, file_name, mime_type='imag
     file_metadata = {'name': file_name, 'parents': [drive_folder_id]}
     file_size = os.path.getsize(local_path)
     
-    # 1. Nếu file nhỏ (< 5MB - chủ yếu là Ảnh), upload trực tiếp không dùng Resumable
-    if file_size < 5 * 1024 * 1024:
-        media = MediaFileUpload(local_path, mimetype=mime_type, resumable=False)
-        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute(num_retries=5)
-        return file.get('id')
-
-    # 2. Nếu file lớn (>= 5MB - Video), chia gói 2MB + tự động Retry nếu rớt mạng
-    media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=2*1024*1024, resumable=True)
-    request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
-    
-    response = None
-    while response is None:
-        for attempt in range(5): # Thử lại tối đa 5 lần cho mỗi gói dữ liệu
-            try:
-                status, response = request.next_chunk(num_retries=3)
-                break
-            except Exception as e:
-                if attempt == 4: # Nếu thử 5 lần vẫn thất bại mới báo lỗi
-                    raise e
-                time.sleep(2 ** attempt) # Chờ 1s, 2s, 4s, 8s... rồi gửi lại
-                
-    return response.get('id')
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # File dưới 15MB: dùng Direct Upload (ổn định nhất, không bị lỗi Resumable)
+            if file_size < 15 * 1024 * 1024:
+                media = MediaFileUpload(local_path, mimetype=mime_type, resumable=False)
+                file = drive_service.files().create(
+                    body=file_metadata, 
+                    media_body=media, 
+                    fields='id'
+                ).execute(num_retries=3)
+                return file.get('id')
+            else:
+                # File lớn hơn 15MB: dùng Resumable nhưng tạo mới request nếu lỗi
+                media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=1024*1024, resumable=True)
+                request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
+                response = None
+                while response is None:
+                    status, response = request.next_chunk(num_retries=3)
+                return response.get('id')
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            time.sleep(3 * (attempt + 1)) # Chờ 3s, 6s... trước khi thử lại toàn bộ process
 
 def move_drive_file(file_id, old_folder_id, new_folder_id):
     drive_service.files().update(
@@ -216,7 +218,17 @@ def process_video(local_vid_path, logo_path, font_path, music_path, display_code
     if final_aud: combined.audio = final_aud
 
     out_vid_path = tempfile.mktemp(suffix=".mp4")
-    combined.write_videofile(out_vid_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+    # ⚡ Nén video dung lượng tối ưu & render cực nhanh để đẩy lên Drive không bị sập
+    combined.write_videofile(
+        out_vid_path, 
+        codec="libx264", 
+        audio_codec="aac", 
+        preset="ultrafast", 
+        bitrate="2500k", 
+        threads=2, 
+        verbose=False, 
+        logger=None
+    )
     combined.close(); video.close()
     return out_vid_path
 
