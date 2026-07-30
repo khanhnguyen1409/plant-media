@@ -86,9 +86,24 @@ def download_file_from_drive(file_id, local_path):
 
 def upload_file_to_drive(local_path, drive_folder_id, file_name, mime_type='image/jpeg'):
     file_metadata = {'name': file_name, 'parents': [drive_folder_id]}
-    media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
-    file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-    return file.get('id')
+    
+    # Ưu tiên Direct Upload (resumable=False) để tránh lỗi ResumableUploadError trên Streamlit Cloud
+    try:
+        media = MediaFileUpload(local_path, mimetype=mime_type, resumable=False)
+        file = drive_service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id'
+        ).execute()
+        return file.get('id')
+    except Exception as e:
+        # Dự phòng: Thử lại với chunk size cố định 5MB nếu file quá dung lượng
+        media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=5*1024*1024, resumable=True)
+        request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+        return response.get('id')
 
 def move_drive_file(file_id, old_folder_id, new_folder_id):
     drive_service.files().update(
@@ -169,11 +184,9 @@ def process_video(local_vid_path, logo_path, font_path, music_path, display_code
     else:
         final_aud = video.audio
 
-    # 1. Chèn Logo
     logo_w = int(vw * 0.12)
     logo = ImageClip(logo_path).resize(width=logo_w).set_duration(dur).set_position((vw - logo_w - int(vw*0.01), int(vh*0.01)))
 
-    # 2. Tạo Mã Số bằng PIL (Tránh 100% lỗi ImageMagick / TextClip)
     font_size = int(vh * 0.025)
     try: font = ImageFont.truetype(font_path, font_size)
     except: font = ImageFont.load_default()
