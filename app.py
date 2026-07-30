@@ -31,12 +31,11 @@ if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = getattr(Image.Resampling, 'LANCZOS', Image.LANCZOS)
 
 # ---------------------------------------------------------
-# 2. KẾT NỐI GOOGLE APIS TỪ STREAMLIT SECRETS (ĐÃ FIX LỖI PEM)
+# 2. KẾT NỐI GOOGLE APIS TỪ STREAMLIT SECRETS
 # ---------------------------------------------------------
 @st.cache_resource
 def get_google_services():
     try:
-        # 🔑 Hỗ trợ đọc cả dạng JSON thô (gcp_json) lẫn dạng TOML cũ (gcp_service_account)
         if "gcp_json" in st.secrets:
             creds_json = json.loads(st.secrets["gcp_json"], strict=False)
         elif "gcp_service_account" in st.secrets:
@@ -144,7 +143,7 @@ def process_image(local_img_path, logo_path, font_path, display_code, price, ski
     return out_no_price, out_price
 
 def process_video(local_vid_path, logo_path, font_path, music_path, display_code):
-    from moviepy.editor import VideoFileClip, ImageClip, TextClip, CompositeVideoClip, AudioFileClip, CompositeAudioClip
+    from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip, AudioFileClip, CompositeAudioClip
     import moviepy.audio.fx.all as afx
     from moviepy.audio.fx.all import audio_loop
 
@@ -170,9 +169,29 @@ def process_video(local_vid_path, logo_path, font_path, music_path, display_code
     else:
         final_aud = video.audio
 
+    # 1. Chèn Logo
     logo_w = int(vw * 0.12)
     logo = ImageClip(logo_path).resize(width=logo_w).set_duration(dur).set_position((vw - logo_w - int(vw*0.01), int(vh*0.01)))
-    name = TextClip(f"{display_code}\n", font=font_path, fontsize=int(vh*0.013), color="white", method="label").set_duration(dur).set_position(("center", vh - int(vh*0.05)))
+
+    # 2. Tạo Mã Số bằng PIL (Tránh 100% lỗi ImageMagick / TextClip)
+    font_size = int(vh * 0.025)
+    try: font = ImageFont.truetype(font_path, font_size)
+    except: font = ImageFont.load_default()
+
+    dummy_img = Image.new("RGBA", (1, 1))
+    draw = ImageDraw.Draw(dummy_img)
+    bbox = draw.textbbox((0, 0), display_code, font=font)
+    txt_w = (bbox[2] - bbox[0]) + 40
+    txt_h = (bbox[3] - bbox[1]) + 20
+
+    txt_img = Image.new("RGBA", (txt_w, txt_h), (0, 0, 0, 0))
+    txt_draw = ImageDraw.Draw(txt_img)
+    txt_draw.text((20, 10 - bbox[1]), display_code, fill="white", font=font)
+
+    temp_txt_path = tempfile.mktemp(suffix=".png")
+    txt_img.save(temp_txt_path, "PNG")
+
+    name = ImageClip(temp_txt_path).set_duration(dur).set_position(("center", vh - int(vh*0.06)))
 
     combined = CompositeVideoClip([video.without_audio(), logo, name], size=(vw, vh))
     if final_aud: combined.audio = final_aud
