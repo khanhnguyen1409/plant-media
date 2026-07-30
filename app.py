@@ -86,24 +86,30 @@ def download_file_from_drive(file_id, local_path):
 
 def upload_file_to_drive(local_path, drive_folder_id, file_name, mime_type='image/jpeg'):
     file_metadata = {'name': file_name, 'parents': [drive_folder_id]}
+    file_size = os.path.getsize(local_path)
     
-    # Ưu tiên Direct Upload (resumable=False) để tránh lỗi ResumableUploadError trên Streamlit Cloud
-    try:
+    # 1. Nếu file nhỏ (< 5MB - chủ yếu là Ảnh), upload trực tiếp không dùng Resumable
+    if file_size < 5 * 1024 * 1024:
         media = MediaFileUpload(local_path, mimetype=mime_type, resumable=False)
-        file = drive_service.files().create(
-            body=file_metadata, 
-            media_body=media, 
-            fields='id'
-        ).execute()
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute(num_retries=5)
         return file.get('id')
-    except Exception as e:
-        # Dự phòng: Thử lại với chunk size cố định 5MB nếu file quá dung lượng
-        media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=5*1024*1024, resumable=True)
-        request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
-        response = None
-        while response is None:
-            status, response = request.next_chunk()
-        return response.get('id')
+
+    # 2. Nếu file lớn (>= 5MB - Video), chia gói 2MB + tự động Retry nếu rớt mạng
+    media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=2*1024*1024, resumable=True)
+    request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
+    
+    response = None
+    while response is None:
+        for attempt in range(5): # Thử lại tối đa 5 lần cho mỗi gói dữ liệu
+            try:
+                status, response = request.next_chunk(num_retries=3)
+                break
+            except Exception as e:
+                if attempt == 4: # Nếu thử 5 lần vẫn thất bại mới báo lỗi
+                    raise e
+                time.sleep(2 ** attempt) # Chờ 1s, 2s, 4s, 8s... rồi gửi lại
+                
+    return response.get('id')
 
 def move_drive_file(file_id, old_folder_id, new_folder_id):
     drive_service.files().update(
