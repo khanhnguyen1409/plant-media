@@ -88,30 +88,26 @@ def upload_file_to_drive(local_path, drive_folder_id, file_name, mime_type='imag
     file_metadata = {'name': file_name, 'parents': [drive_folder_id]}
     file_size = os.path.getsize(local_path)
     
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # File dưới 15MB: dùng Direct Upload (ổn định nhất, không bị lỗi Resumable)
-            if file_size < 15 * 1024 * 1024:
-                media = MediaFileUpload(local_path, mimetype=mime_type, resumable=False)
-                file = drive_service.files().create(
-                    body=file_metadata, 
-                    media_body=media, 
-                    fields='id'
-                ).execute(num_retries=3)
-                return file.get('id')
-            else:
-                # File lớn hơn 15MB: dùng Resumable nhưng tạo mới request nếu lỗi
-                media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=1024*1024, resumable=True)
-                request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
-                response = None
-                while response is None:
-                    status, response = request.next_chunk(num_retries=3)
-                return response.get('id')
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise e
-            time.sleep(3 * (attempt + 1)) # Chờ 3s, 6s... trước khi thử lại toàn bộ process
+    # 🔑 ĐIỀU CHỈNH CHUẨN GOOGLE DRIVE API:
+    # 1. File dưới 5MB (chủ yếu là Ảnh): Upload trực tiếp nhanh gọn
+    if file_size < 5 * 1024 * 1024:
+        media = MediaFileUpload(local_path, mimetype=mime_type, resumable=False)
+        file = drive_service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id'
+        ).execute(num_retries=3)
+        return file.get('id')
+    else:
+        # 2. File từ 5MB trở lên (Video): Bắt buộc dùng Resumable với chunk 5MB chuẩn
+        chunk_size = 5 * 1024 * 1024 # Bội số chuẩn 256KB
+        media = MediaFileUpload(local_path, mimetype=mime_type, chunksize=chunk_size, resumable=True)
+        request = drive_service.files().create(body=file_metadata, media_body=media, fields='id')
+        
+        response = None
+        while response is None:
+            status, response = request.next_chunk(num_retries=5)
+        return response.get('id')
 
 def move_drive_file(file_id, old_folder_id, new_folder_id):
     drive_service.files().update(
@@ -218,7 +214,6 @@ def process_video(local_vid_path, logo_path, font_path, music_path, display_code
     if final_aud: combined.audio = final_aud
 
     out_vid_path = tempfile.mktemp(suffix=".mp4")
-    # ⚡ Nén video dung lượng tối ưu & render cực nhanh để đẩy lên Drive không bị sập
     combined.write_videofile(
         out_vid_path, 
         codec="libx264", 
